@@ -15,5 +15,5 @@ Then just type `claude`. It starts in your current directory when Ubuntu can
 see it: Termux home, `/sdcard/...` or `~/storage/...`. Otherwise it starts in
 Termux home. Anything after `claude` is passed through (e.g. `claude -c`).
 
-Inside Claude, Ubuntu's `apt install` works for extra tools. Your Claude login
+Re-run the script to update Claude Code. Your Claude login
 and settings live in Ubuntu's `/root/.claude`.

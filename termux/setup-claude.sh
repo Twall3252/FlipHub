@@ -54,29 +54,48 @@ if [[ -z "$ROOTFS" ]]; then
   [[ -n "$ROOTFS" ]] || die "installed $DISTRO but can't find its files under $PD_DIR"
 fi
 
-# 5. Claude Code and basic tools inside Ubuntu.
-say "Installing tools and Claude Code inside $DISTRO (this can take a while)"
-proot-distro login "$DISTRO" -- bash -c '
-  set -e
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y curl ca-certificates git ripgrep unzip nano procps
-  if [ ! -x /root/.local/bin/claude ] && [ ! -x /usr/local/bin/claude ]; then
-    curl -fsSL https://claude.ai/install.sh | bash || {
-      echo "Native installer failed; falling back to npm" >&2
-      apt-get install -y nodejs npm
-      npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code
-    }
-  fi
-  grep -q "/.local/bin" /root/.bashrc 2>/dev/null ||
-    echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> /root/.bashrc
-'
+# 5. Claude Code inside Ubuntu. Termux downloads the Linux build and copies
+# it into the container, so nothing runs apt inside proot (apt tends to hang
+# there on Android).
+case "$(uname -m)" in
+  aarch64|arm64) CC_ARCH=arm64 ;;
+  x86_64)        CC_ARCH=x64 ;;
+  *) die "unsupported CPU: $(uname -m)" ;;
+esac
+CC_PKG="@anthropic-ai/claude-code-linux-$CC_ARCH"
+say "Looking up the latest Claude Code for linux-$CC_ARCH"
+meta="$(curl -fsSL "https://registry.npmjs.org/$CC_PKG/latest")" ||
+  die "couldn't reach registry.npmjs.org - check your internet connection."
+CC_VERSION="$(printf '%s' "$meta" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n1)"
+CC_TARBALL="$(printf '%s' "$meta" | sed -n 's/.*"tarball":"\([^"]*\)".*/\1/p' | head -n1)"
+[[ -n "$CC_VERSION" && -n "$CC_TARBALL" ]] || die "couldn't read the Claude Code version from the registry."
+
+CC_BIN="$ROOTFS/usr/local/bin/claude"
+installed="$([[ -x "$CC_BIN" ]] && cat "$ROOTFS/usr/local/share/claude-version" 2>/dev/null || true)"
+if [[ "$installed" == "$CC_VERSION" ]]; then
+  say "Claude Code $CC_VERSION is already installed"
+else
+  say "Downloading Claude Code $CC_VERSION (about 100 MB)"
+  tmp="$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/claude.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+  curl -fL --progress-bar -o "$tmp/claude.tgz" "$CC_TARBALL"
+  tar -xzf "$tmp/claude.tgz" -C "$tmp" package/claude
+  mkdir -p "$ROOTFS/usr/local/bin" "$ROOTFS/usr/local/share"
+  mv -f "$tmp/package/claude" "$CC_BIN"
+  chmod 755 "$CC_BIN"
+  printf '%s\n' "$CC_VERSION" > "$ROOTFS/usr/local/share/claude-version"
+fi
+
+say "Checking that Claude Code runs inside $DISTRO"
+if ! timeout 120 proot-distro login "$DISTRO" -- /usr/local/bin/claude --version; then
+  warn "'claude --version' failed or timed out inside $DISTRO; the launcher is installed anyway."
+fi
 
 # Entry point inside Ubuntu: finds Claude wherever the installer put it.
 cat > "$ROOTFS/usr/local/bin/claude-entry" <<'ENTRY'
 #!/bin/sh
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
-for c in "$HOME/.local/bin/claude" /usr/local/bin/claude /usr/bin/claude; do
+for c in /usr/local/bin/claude "$HOME/.local/bin/claude" /usr/bin/claude; do
   [ -x "$c" ] && exec "$c" "$@"
 done
 echo "Claude Code isn't installed inside Ubuntu. Re-run setup-claude.sh in Termux." >&2
@@ -117,3 +136,4 @@ hash -r 2>/dev/null || true
 
 say "Done. Type 'claude' in Termux to start Claude Code."
 say "Tip: 'cd ~/storage/downloads' (or any /sdcard folder) first to work there."
+say "To update Claude Code later, re-run this script."
